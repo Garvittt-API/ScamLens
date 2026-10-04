@@ -17,6 +17,10 @@ export interface HistoryEntry {
   signal_titles: string[];
 }
 
+const EMPTY: HistoryEntry[] = [];
+const INPUT_TYPES = new Set<string>(["text", "image", "url"]);
+const RISK_LEVELS = new Set<string>(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
+
 function isBrowser(): boolean {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
@@ -37,7 +41,68 @@ export function subscribeHistory(listener: () => void): () => void {
       window.removeEventListener("storage", onStorage);
     };
   }
-  return () => listeners.delete(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+function isHistoryEntry(value: unknown): value is HistoryEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const entry = value as Record<string, unknown>;
+  return (
+    typeof entry.id === "string" &&
+    entry.id.length > 0 &&
+    typeof entry.summary === "string" &&
+    typeof entry.risk_score === "number" &&
+    Number.isFinite(entry.risk_score) &&
+    typeof entry.risk_level === "string" &&
+    RISK_LEVELS.has(entry.risk_level) &&
+    typeof entry.input_type === "string" &&
+    INPUT_TYPES.has(entry.input_type) &&
+    typeof entry.created_at === "string" &&
+    !Number.isNaN(Date.parse(entry.created_at)) &&
+    Array.isArray(entry.signal_titles) &&
+    entry.signal_titles.every((title) => typeof title === "string")
+  );
+}
+
+/**
+ * Cached snapshot: useSyncExternalStore REQUIRES a stable reference between
+ * changes — returning a fresh array on every read makes React throw
+ * "The result of getSnapshot should be cached to avoid an infinite loop".
+ * The cache is invalidated only when the raw stored string changes.
+ */
+let cachedRaw: string | null = null;
+let cachedSnapshot: HistoryEntry[] = EMPTY;
+let cachePrimed = false;
+
+export function loadHistory(): HistoryEntry[] {
+  if (!isBrowser()) return EMPTY;
+
+  let raw: string | null = null;
+  try {
+    raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+  } catch {
+    return EMPTY;
+  }
+
+  if (cachePrimed && raw === cachedRaw) return cachedSnapshot;
+
+  cachedRaw = raw;
+  cachePrimed = true;
+
+  if (!raw) {
+    cachedSnapshot = EMPTY;
+    return EMPTY;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    cachedSnapshot = Array.isArray(parsed) ? parsed.filter(isHistoryEntry) : EMPTY;
+  } catch {
+    cachedSnapshot = EMPTY;
+  }
+  return cachedSnapshot;
 }
 
 export function getHistorySnapshot(): HistoryEntry[] {
@@ -45,27 +110,7 @@ export function getHistorySnapshot(): HistoryEntry[] {
 }
 
 export function getHistoryServerSnapshot(): HistoryEntry[] {
-  return [];
-}
-
-export function loadHistory(): HistoryEntry[] {
-  if (!isBrowser()) return [];
-  try {
-    const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (entry): entry is HistoryEntry =>
-        typeof entry === "object" &&
-        entry !== null &&
-        typeof entry.id === "string" &&
-        typeof entry.summary === "string" &&
-        typeof entry.risk_score === "number",
-    );
-  } catch {
-    return [];
-  }
+  return EMPTY;
 }
 
 function persist(entries: HistoryEntry[]): void {
@@ -86,7 +131,7 @@ export function saveToHistory(result: AnalysisResult): HistoryEntry {
     risk_level: result.risk_level,
     risk_score: result.risk_score,
     summary: result.summary.slice(0, 200),
-    signal_titles: result.signals.map((signal) => signal.title).slice(0, 8),
+    signal_titles: [...new Set(result.signals.map((signal) => signal.title))].slice(0, 8),
   };
 
   const next = [entry, ...loadHistory().filter((existing) => existing.id !== entry.id)].slice(
